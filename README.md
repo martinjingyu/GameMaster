@@ -59,11 +59,11 @@ http://127.0.0.1:8787/test
 
 页面里可以：
 
-- 点“一键建 5 人局”创建本地频道并让 5 个模拟玩家加入。
-- 点“开始”分配身份；公开消息进入群聊，私密身份进入每个玩家自己的窗口。
+- 点“一键建 5 人局”让 5 个模拟玩家加入；游戏由 agent pipeline 自动创建和倒计时开始。
+- 公开消息进入群聊，私密身份进入每个玩家自己的窗口。
 - 在任意玩家窗口里切换“私聊/群聊”，模拟微信里私聊说书人或群内发言。
 - 夜晚私聊任意文本会被记录为行动。
-- 点“结算”会让 LLM 读取魔典和夜间行动，生成公开/私密结算建议并应用死亡/复活。
+- 夜晚倒计时结束后，agent 可以自动调用 LLM 读取魔典和夜间行动，生成公开/私密结算建议并应用死亡/复活。
 
 健康检查：
 
@@ -103,6 +103,87 @@ LLM 每次只拿：
 ```text
 GET /games/<game_id>/memory
 ```
+
+## Agent Pipeline
+
+主持流程由 agent 主导，不依赖玩家房主。本地网页会按 `GAMEMASTER_TICK_SECONDS` 调用：
+
+```text
+POST /agent/tick
+```
+
+pipeline 当前是 hard-coded 的基础流程：
+
+1. 频道没有游戏时，自动创建默认剧本。
+2. lobby 阶段等待玩家加入。
+3. 达到 `GAMEMASTER_MIN_PLAYERS_TO_START` 后，进入开局倒计时。
+4. 倒计时结束后自动 `/start`，分发身份并进入首夜。
+5. 夜晚开始行动倒计时，玩家私聊行动会进入 memory。
+6. 夜晚倒计时结束后，如果 `GAMEMASTER_AUTO_RESOLVE_NIGHT=true`，自动 `/resolve`。
+7. 结算后自动进入白天讨论。
+8. 白天倒计时结束后，默认等待说书人继续；如果 `GAMEMASTER_AUTO_ADVANCE_DAY=true`，会自动进入下一夜。
+
+统一配置在 `.env`：
+
+```env
+GAMEMASTER_DEFAULT_CHANNEL_ID=local-table
+GAMEMASTER_DEFAULT_SCRIPT=tb
+GAMEMASTER_MIN_PLAYERS_TO_START=5
+GAMEMASTER_AUTO_CREATE_GAME=true
+GAMEMASTER_AUTO_START_GAME=true
+GAMEMASTER_AUTO_RESOLVE_NIGHT=true
+GAMEMASTER_AUTO_ADVANCE_DAY=false
+GAMEMASTER_LOBBY_COUNTDOWN_SECONDS=30
+GAMEMASTER_NIGHT_ACTION_SECONDS=90
+GAMEMASTER_DAY_DISCUSSION_SECONDS=300
+GAMEMASTER_TICK_SECONDS=1
+```
+
+查看当前配置：
+
+```text
+GET /agent/config
+```
+
+运行时控制当前局：
+
+```text
+POST /agent/action
+```
+
+示例：
+
+```json
+{
+  "channel_id": "local-table",
+  "action": "extend",
+  "params": { "seconds": 60 }
+}
+```
+
+可用 action：
+
+- `extend`：延长当前阶段倒计时，参数 `seconds`，可选 `timer`
+- `shorten`：缩短当前阶段倒计时
+- `set_timer`：把当前阶段倒计时设置为指定秒数
+- `pause`：暂停 pipeline
+- `resume`：恢复 pipeline
+- `set_override`：覆盖当前局的某个配置，例如 `night_action_seconds`
+- `clear_override`：清除当前局配置覆盖
+- `force_stage`：强制设置当前 pipeline stage
+
+说书人 agent 也可以通过聊天命令执行同样动作：
+
+```text
+/pipeline extend 60
+/pipeline set_timer 120 night_deadline
+/pipeline set_override night_action_seconds 180
+/pipeline pause
+/pipeline resume
+/pipeline force_stage day_discussion
+```
+
+这些是“当前局覆盖”，不会改 `.env` 的默认值。适合中途加人、玩家掉线、讨论太热烈、夜晚行动没收齐等情况。
 
 ## 本地网页背后的事件接口
 

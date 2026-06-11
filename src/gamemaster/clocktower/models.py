@@ -86,6 +86,7 @@ class Game:
     public_log: list[str] = field(default_factory=list)
     memory_events: list[MemoryEvent] = field(default_factory=list)
     memory_summary: str = ""
+    pipeline_state: dict[str, Any] = field(default_factory=dict)
     winner: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

@@ -645,10 +645,36 @@ TEST_CLIENT_HTML = """<!doctype html>
       }
     }
 
+    async function tickAgent() {
+      try {
+        const response = await fetch("/agent/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel_id: channelId() })
+        });
+        const data = await response.json();
+        if (!response.ok || data.ok === false) {
+          throw new Error(data.error || data.gateway_error || `HTTP ${response.status}`);
+        }
+        const messages = data.messages || [];
+        if (messages.length > 0) {
+          routeMessages(messages);
+          setStatus(`Pipeline tick: ${messages.length} message(s).`);
+        }
+      } catch (error) {
+        setStatus(`Pipeline stopped: ${error.message}`, true);
+      }
+    }
+
+    function startAgentLoop(config) {
+      const tickSeconds = Math.max(1, Number(config?.tick_seconds || 1));
+      tickAgent();
+      window.setInterval(tickAgent, tickSeconds * 1000);
+    }
+
     async function setupDemo() {
       clearFeeds();
-      const script = $("#scriptName").value;
-      await sendSystemEvent(`/new ${script}`);
+      await tickAgent();
       for (const player of state.players.slice(0, 5)) {
         await sendEvent(player, `/join ${player.display_name}`, false);
       }
@@ -709,6 +735,7 @@ TEST_CLIENT_HTML = """<!doctype html>
       .then((response) => response.json())
       .then((data) => {
         const llm = data.llm || {};
+        startAgentLoop(data.config || {});
         if (llm.configured) {
           setStatus(`LLM 已配置：${llm.model}`);
         } else {

@@ -62,6 +62,7 @@ class GameMasterAgent:
         self.engine = ClocktowerEngine(store)
         self.llm = llm or StorytellerLLM.from_env()
         self.memory = GameMemory()
+        self.pipeline = None
         self.allow_player_storyteller_commands = env_bool(
             "GAMEMASTER_ALLOW_PLAYER_ST_COMMANDS", False
         )
@@ -146,6 +147,8 @@ class GameMasterAgent:
                 return [self._private(event, self.engine.list_actions(game), game)]
             if command in ("/resolve", "/结算"):
                 return self._cmd_resolve(event)
+            if command in ("/pipeline", "/stage"):
+                return self._cmd_pipeline(event, args)
             if command in ("/nominate", "/提名"):
                 return self._cmd_nominate(event, args)
             if command in ("/vote", "/投票"):
@@ -386,6 +389,51 @@ class GameMasterAgent:
         if not messages:
             messages.append(self._private(event, "LLM 没有生成需要发送的结算消息。", game))
         return messages
+
+    def _cmd_pipeline(self, event: GatewayEvent, args: list[str]) -> list[OutboundMessage]:
+        game = self._current_game(event)
+        self._require_storyteller(event)
+        if not self.pipeline:
+            raise GameError("Pipeline is not attached to this agent.")
+        if not args:
+            return [self._private(event, "pipeline_state=" + str(game.pipeline_state), game)]
+
+        action = args[0]
+        params: dict[str, Any] = {}
+        if action in {"extend", "shorten", "set_timer"}:
+            if len(args) < 2:
+                raise GameError("Usage: /pipeline extend|shorten|set_timer <seconds> [timer]")
+            params["seconds"] = int(args[1])
+            if len(args) >= 3:
+                params["timer"] = args[2]
+        elif action in {"set_override", "override"}:
+            if len(args) < 3:
+                raise GameError("Usage: /pipeline set_override <name> <value>")
+            action = "set_override"
+            params["name"] = args[1]
+            params["value"] = self._parse_pipeline_value(args[2])
+        elif action == "clear_override":
+            if len(args) < 2:
+                raise GameError("Usage: /pipeline clear_override <name>")
+            params["name"] = args[1]
+        elif action == "force_stage":
+            if len(args) < 2:
+                raise GameError("Usage: /pipeline force_stage <stage>")
+            params["stage"] = args[1]
+
+        return [self.pipeline.apply_action(game, action, params, actor_id=event.user_id)]
+
+    @staticmethod
+    def _parse_pipeline_value(value: str) -> object:
+        lowered = value.lower()
+        if lowered in {"true", "yes", "on"}:
+            return True
+        if lowered in {"false", "no", "off"}:
+            return False
+        try:
+            return int(value)
+        except ValueError:
+            return value
 
     def _current_game(self, event: GatewayEvent) -> Game:
         game = self.store.current_for_channel(event.channel_id)

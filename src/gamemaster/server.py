@@ -9,21 +9,27 @@ from urllib.parse import urlparse
 
 from .agent import GameMasterAgent, GatewayEvent
 from .channel import ChannelGatewayClient
-from .config import load_env_file
+from .config import GameMasterConfig, load_env_file
 from .clocktower.engine import GameStore
 from .clocktower.scripts import SCRIPTS
 from .local_web import TEST_CLIENT_HTML
+from .pipeline import AgentPipeline
 
 
 def serve(host: str = "127.0.0.1", port: int = 8787, data_path: Path | None = None) -> None:
     load_env_file()
+    config = GameMasterConfig.from_env()
     store = GameStore(data_path)
     agent = GameMasterAgent(store)
+    pipeline = AgentPipeline(agent, config)
+    agent.pipeline = pipeline
     gateway = ChannelGatewayClient.from_env()
 
     class Handler(GameMasterHandler):
+        gamemaster_config = config
         game_store = store
         game_agent = agent
+        agent_pipeline = pipeline
         channel_gateway = gateway
 
     server = ThreadingHTTPServer((host, port), Handler)
@@ -35,6 +41,8 @@ def serve(host: str = "127.0.0.1", port: int = 8787, data_path: Path | None = No
 class GameMasterHandler(BaseHTTPRequestHandler):
     game_store: GameStore
     game_agent: GameMasterAgent
+    agent_pipeline: AgentPipeline
+    gamemaster_config: GameMasterConfig
     channel_gateway: ChannelGatewayClient
 
     server_version = "GameMaster/0.1"
@@ -42,7 +50,16 @@ class GameMasterHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/health":
-            self._send_json({"ok": True, "llm": self.game_agent.llm.status()})
+            self._send_json(
+                {
+                    "ok": True,
+                    "llm": self.game_agent.llm.status(),
+                    "config": self.gamemaster_config.to_dict(),
+                }
+            )
+            return
+        if path == "/agent/config":
+            self._send_json({"ok": True, "config": self.gamemaster_config.to_dict()})
             return
         if path in ("/", "/test", "/test-mode"):
             self._send_html(TEST_CLIENT_HTML)
@@ -88,6 +105,48 @@ class GameMasterHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/agent/tick":
+            try:
+                payload = self._read_json()
+                channel_id = payload.get("channel_id") or self.gamemaster_config.default_channel_id
+                messages = self.agent_pipeline.tick(str(channel_id))
+                send_error = None
+                try:
+                    self.channel_gateway.send(messages)
+                except RuntimeError as exc:
+                    send_error = str(exc)
+                self._send_json(
+                    {
+                        "ok": send_error is None,
+                        "messages": [message.to_dict() for message in messages],
+                        "gateway_error": send_error,
+                    },
+                    status=HTTPStatus.ACCEPTED if send_error is None else HTTPStatus.BAD_GATEWAY,
+                )
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if path == "/agent/action":
+            try:
+                payload = self._read_json()
+                channel_id = str(payload.get("channel_id") or self.gamemaster_config.default_channel_id)
+                game = self.game_store.current_for_channel(channel_id)
+                if not game:
+                    self._send_json(
+                        {"ok": False, "error": "no active game for channel"},
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                message = self.agent_pipeline.apply_action(
+                    game,
+                    str(payload.get("action") or ""),
+                    dict(payload.get("params") or {}),
+                    actor_id=str(payload.get("actor_id") or "__storyteller__"),
+                )
+                self._send_json({"ok": True, "messages": [message.to_dict()]})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         if path not in ("/gateway/events", "/events"):
             self._send_json({"ok": False, "error": "not found"}, status=HTTPStatus.NOT_FOUND)
             return
