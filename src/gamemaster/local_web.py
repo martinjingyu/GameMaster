@@ -443,6 +443,7 @@ TEST_CLIENT_HTML = """<!doctype html>
           <button data-fill="/new tb">/new</button>
           <button data-fill="/join">/join</button>
           <button data-fill="/role">/role</button>
+          <button data-fill="/gm ">Ask GM</button>
           <button data-fill="/action ">行动</button>
           <button data-fill="/nominate ">提名</button>
           <button data-fill="/vote yes">赞成</button>
@@ -1006,6 +1007,7 @@ CORE_CHAT_CLIENT_HTML = """<!doctype html>
         </div>
         <div class="commands">
           <button data-fill="/role">/role</button>
+          <button data-fill="/gm ">Ask GM</button>
           <button data-fill="/action ">夜间行动</button>
           <button data-fill="/nominate ">提名</button>
           <button data-fill="/vote yes">赞成</button>

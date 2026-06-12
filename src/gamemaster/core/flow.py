@@ -154,8 +154,13 @@ class GameFlow:
         self.grimoire.change_phase(GamePhase.FIRST_NIGHT)
 
     def enter_day(self) -> None:
+        if self.grimoire.phase == GamePhase.DAY:
+            return
         self.grimoire.day += 1
         self.grimoire.night_actions.clear()
+        self.grimoire.pipeline_state.pop("day_deadline", None)
+        self.grimoire.pipeline_state.pop("day_timer_expired_day", None)
+        self.grimoire.pipeline_state["stage"] = "day_discussion"
         self.grimoire.pipeline_state["day_state"] = {
             "day": self.grimoire.day,
             "nominations": [],

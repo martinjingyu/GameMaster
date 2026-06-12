@@ -73,6 +73,10 @@ class CorePipeline:
             if messages:
                 self._changed()
             return messages
+        if flow.grimoire.phase in {GamePhase.VOTING, GamePhase.EXECUTION}:
+            if self._pause_day_timer_for_interruption(flow):
+                self._changed()
+            return []
         return []
 
     def apply_action(
@@ -212,6 +216,8 @@ class CorePipeline:
         deadline_key = "day_deadline"
         deadline = self._deadline(flow, deadline_key)
         if not deadline:
+            if flow.grimoire.pipeline_state.get("day_timer_expired_day") == flow.grimoire.day:
+                return []
             seconds = int(self._setting(flow, "day_discussion_seconds"))
             self._set_deadline(flow, deadline_key, seconds)
             flow.grimoire.pipeline_state["stage"] = "day_discussion"
@@ -222,7 +228,16 @@ class CorePipeline:
             return []
 
         if not self._setting(flow, "auto_advance_day"):
-            return []
+            self._clear_deadline(flow, deadline_key)
+            flow.grimoire.pipeline_state["day_timer_expired_day"] = flow.grimoire.day
+            flow.grimoire.pipeline_state["stage"] = "day_discussion_expired"
+            return [
+                self._public(
+                    flow,
+                    channel_id,
+                    "Day discussion timer expired. Waiting for nominations or storyteller action.",
+                )
+            ]
 
         result = flow.end_day()
         self._clear_deadline(flow, deadline_key)
@@ -254,6 +269,16 @@ class CorePipeline:
 
     def _clear_deadline(self, flow: GameFlow, key: str) -> None:
         flow.grimoire.pipeline_state.pop(key, None)
+
+    def _pause_day_timer_for_interruption(self, flow: GameFlow) -> bool:
+        changed = False
+        if flow.grimoire.pipeline_state.pop("day_deadline", None) is not None:
+            changed = True
+        stage = "voting" if flow.grimoire.phase == GamePhase.VOTING else "execution"
+        if flow.grimoire.pipeline_state.get("stage") != stage:
+            flow.grimoire.pipeline_state["stage"] = stage
+            changed = True
+        return changed
 
     def _active_deadline_key(self, flow: GameFlow) -> str:
         for key in ("lobby_start_deadline", "night_deadline", "day_deadline"):

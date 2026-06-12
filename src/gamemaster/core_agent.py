@@ -39,12 +39,16 @@ class CoreAgent:
                 return self._cmd_role(event)
             if command == "/status":
                 return self._cmd_status(event)
+            if command in {"/gm", "/ask"}:
+                return self._cmd_gm(event, args)
             if command == "/action":
                 return self._cmd_action(event, args)
             if command == "/resolve":
                 return self._cmd_resolve(event)
             if command == "/day":
                 flow = self._current_flow(event)
+                if flow.grimoire.phase == GamePhase.DAY:
+                    return [self._private(event, f"Already day {flow.grimoire.day}.")]
                 flow.enter_day()
                 return [self._public(event, f"Day {flow.grimoire.day} begins.")]
             if command == "/night":
@@ -155,6 +159,16 @@ class CoreAgent:
             )
         ]
 
+    def _cmd_gm(self, event: GatewayEvent, args: list[str]) -> list[OutboundMessage]:
+        flow = self._current_flow(event)
+        question = " ".join(args).strip()
+        if not question:
+            return [self._private(event, "Usage: /gm <question>")]
+        answer = self.responder.reply(flow, event.user_id, question, private=event.is_private)
+        if event.is_private:
+            return [self._private(event, answer)]
+        return [self._public(event, answer)]
+
     def _cmd_action(self, event: GatewayEvent, args: list[str]) -> list[OutboundMessage]:
         flow = self._current_flow(event)
         assignment = flow.grimoire.assignments.get(event.user_id)
@@ -174,6 +188,13 @@ class CoreAgent:
 
     def _cmd_resolve(self, event: GatewayEvent) -> list[OutboundMessage]:
         flow = self._current_flow(event)
+        if flow.grimoire.phase not in {GamePhase.FIRST_NIGHT, GamePhase.NIGHT}:
+            return [
+                self._private(
+                    event,
+                    f"Resolve can only run at night. Current phase is {flow.grimoire.phase.value}, day {flow.grimoire.day}.",
+                )
+            ]
         messages: list[OutboundMessage] = []
         for result in flow.resolve_current_night():
             messages.extend(self._messages_from_result(event, result))
@@ -238,6 +259,8 @@ class CoreAgent:
                 values.update(
                     {
                         str(seat),
+                        f"{seat}号",
+                        f"{seat}號",
                         f"p{seat}",
                         f"player{seat}",
                         f"seat{seat}",
@@ -263,6 +286,16 @@ class CoreAgent:
 
     @staticmethod
     def _parse_day_intent(text: str) -> dict[str, object]:
+        clean_text = text.strip().lower()
+        yes_words_clean = ("赞成", "同意", "投是", "投赞成", "上票", "举手", "支持", "yes", "y", "true")
+        no_words_clean = ("反对", "不同意", "投否", "投反对", "弃票", "不上票", "不举手", "no", "n", "false")
+        nominate_words_clean = ("提名", "我要提", "我提", "nominate")
+        if any(word in clean_text for word in yes_words_clean):
+            return {"intent": "vote", "yes": True}
+        if any(word in clean_text for word in no_words_clean):
+            return {"intent": "vote", "yes": False}
+        if any(word in clean_text for word in nominate_words_clean):
+            return {"intent": "nominate", "target": text}
         normalized = text.strip().lower()
         yes_words = ("赞成", "同意", "投是", "yes", "y", "支持", "上票")
         no_words = ("反对", "不同意", "投否", "no", "n", "弃票", "不上票")

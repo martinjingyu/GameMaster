@@ -38,6 +38,7 @@ class RulesEngine:
             return ActionResult(action_id="nomination-rejected", ok=False, error=error)
 
         phase_event = self._change_phase(grimoire, GamePhase.VOTING)
+        self._pause_day_timer(grimoire, "voting")
         nomination_id = secrets.token_hex(8)
         state = self._day_state(grimoire)
         nomination = {
@@ -94,6 +95,8 @@ class RulesEngine:
         )
 
     def cast_vote(self, grimoire: Grimoire, voter_id: str, yes: bool) -> ActionResult:
+        if grimoire.phase != GamePhase.VOTING:
+            return ActionResult(action_id="vote-rejected", ok=False, error="votes can only be cast during voting")
         nomination = self._active_nomination(grimoire)
         if not nomination:
             return ActionResult(action_id="vote-rejected", ok=False, error="no active nomination")
@@ -139,6 +142,8 @@ class RulesEngine:
         )
 
     def close_vote(self, grimoire: Grimoire) -> ActionResult:
+        if grimoire.phase != GamePhase.VOTING:
+            return ActionResult(action_id="close-vote-rejected", ok=False, error="votes can only close during voting")
         nomination = self._active_nomination(grimoire)
         if not nomination:
             return ActionResult(action_id="close-vote-rejected", ok=False, error="no active nomination")
@@ -149,6 +154,7 @@ class RulesEngine:
         threshold = int(nomination["threshold"])
         if yes_count < threshold:
             phase_event = self._change_phase(grimoire, GamePhase.DAY)
+            self._restart_day_discussion(grimoire)
             event = GameEvent.create(
                 EventType.EXECUTION_RESULT,
                 grimoire.phase,
@@ -199,6 +205,9 @@ class RulesEngine:
             )
 
         phase_event = self._change_phase(grimoire, GamePhase.NIGHT)
+        state = self._day_state(grimoire)
+        state["active_nomination_id"] = None
+        self._pause_day_timer(grimoire, "night_actions")
         return ActionResult(action_id=phase_event.event_id, ok=True, events=(phase_event,))
 
     def use_slayer_shot(self, grimoire: Grimoire, slayer_id: str, target_id: str) -> ActionResult:
@@ -380,8 +389,10 @@ class RulesEngine:
             return ActionResult(action_id="execution-rejected", ok=False, error="target is already dead")
 
         phase_event = self._change_phase(grimoire, GamePhase.EXECUTION)
+        self._pause_day_timer(grimoire, "execution")
         target_assignment.is_alive = False
         state = self._day_state(grimoire)
+        state["active_nomination_id"] = None
         state["executed_player_id"] = target_id
         nomination = self._nomination_by_id(grimoire, nomination_id) if nomination_id else None
         if nomination:
@@ -424,6 +435,7 @@ class RulesEngine:
         resolution_events = tuple(grimoire.events[pre_resolution_event_count:])
         if not win_result.winner:
             day_event = self._change_phase(grimoire, GamePhase.DAY)
+            self._restart_day_discussion(grimoire)
             events = (phase_event, execution_event, death_event, *resolution_events, day_event)
         else:
             events = (phase_event, execution_event, death_event, *resolution_events)
@@ -733,10 +745,28 @@ class RulesEngine:
     def _set_winner(self, grimoire: Grimoire, winner: Alignment, reason: str) -> WinResult:
         grimoire.pipeline_state["winner"] = winner.value
         grimoire.pipeline_state["win_reason"] = reason
+        self._clear_deadlines(grimoire)
+        grimoire.pipeline_state["stage"] = "game_over"
         self._change_phase(grimoire, GamePhase.GAME_OVER)
         grimoire.events[-1].payload["winner"] = winner.value
         grimoire.events[-1].payload["reason"] = reason
         return WinResult(winner, reason)
+
+    @staticmethod
+    def _clear_deadlines(grimoire: Grimoire) -> None:
+        for key in ("lobby_start_deadline", "night_deadline", "day_deadline"):
+            grimoire.pipeline_state.pop(key, None)
+
+    @staticmethod
+    def _pause_day_timer(grimoire: Grimoire, stage: str) -> None:
+        grimoire.pipeline_state.pop("day_deadline", None)
+        grimoire.pipeline_state["stage"] = stage
+
+    @staticmethod
+    def _restart_day_discussion(grimoire: Grimoire) -> None:
+        grimoire.pipeline_state.pop("day_deadline", None)
+        grimoire.pipeline_state.pop("day_timer_expired_day", None)
+        grimoire.pipeline_state["stage"] = "day_discussion"
 
     def _day_state(self, grimoire: Grimoire) -> dict[str, Any]:
         state = grimoire.pipeline_state.get("day_state")

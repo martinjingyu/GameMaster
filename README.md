@@ -367,6 +367,9 @@ GET  /core/games/<game_id>
 GET  /core/games/<game_id>/events?player_id=<player_id>
 ```
 
+Core chat command notes:
+- `/gm <question>` or `/ask <question>` talks directly to the AI Storyteller. It works during night without being parsed as a night action.
+
 这些入口现在由新 core 驱动默认 `/test`；旧页面保留在 `/legacy/test`。`/core/events` 使用和旧 gateway 相同的 payload 形状，但交给新的 `CoreAgent` 处理 `/new`、`/join`、`/start`、`/role`、`/action`、`/resolve`、`/nominate`、`/vote` 等命令，也支持常见自然语言行动、提名和投票。`/core/agent/tick` 使用新的 `CorePipeline` 自动建局、倒计时开局、夜晚提醒、夜晚结算和白天推进；`/core/agent/action` 支持 pause/resume、set_timer、extend、shorten、set_override、clear_override、force_phase。使用 `--data` 启动时，core 状态会保存到独立 `.core.json` 文件。
 
 新 core 也有独立测试页：

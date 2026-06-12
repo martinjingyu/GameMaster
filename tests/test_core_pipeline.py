@@ -72,6 +72,89 @@ class CorePipelineTest(unittest.TestCase):
         self.assertEqual(flow.grimoire.day, 1)
         self.assertTrue(any("Day 1 begins" in message.text for message in messages))
 
+    def test_tick_does_not_auto_advance_while_voting(self) -> None:
+        pipeline = self.make_pipeline()
+        flow = pipeline.create_game("core-pipeline")
+        for index in range(1, 6):
+            flow.join(f"u{index}", f"P{index}")
+        flow.start_setup()
+        flow.assign_role(RoleAssignment("u1", "chef", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u2", "empath", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u3", "washerwoman", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u4", "poisoner", Alignment.EVIL))
+        flow.assign_role(RoleAssignment("u5", "imp", Alignment.EVIL))
+        flow.enter_day()
+        flow.grimoire.pipeline_state["day_deadline"] = "old"
+        flow.nominate("u1", "u4")
+
+        messages = pipeline.tick("core-pipeline")
+
+        self.assertEqual(messages, [])
+        self.assertEqual(flow.grimoire.phase, GamePhase.VOTING)
+        self.assertEqual(flow.grimoire.day, 1)
+        self.assertEqual(flow.grimoire.pipeline_state["stage"], "voting")
+        self.assertNotIn("day_deadline", flow.grimoire.pipeline_state)
+
+    def test_day_timer_restarts_after_vote_closes_without_execution(self) -> None:
+        pipeline = CorePipeline(
+            GameMasterConfig(
+                default_channel_id="core-pipeline",
+                min_players_to_start=5,
+                day_discussion_seconds=30,
+                auto_advance_day=True,
+            )
+        )
+        flow = pipeline.create_game("core-pipeline")
+        for index in range(1, 6):
+            flow.join(f"u{index}", f"P{index}")
+        flow.start_setup()
+        flow.assign_role(RoleAssignment("u1", "chef", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u2", "empath", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u3", "washerwoman", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u4", "poisoner", Alignment.EVIL))
+        flow.assign_role(RoleAssignment("u5", "imp", Alignment.EVIL))
+        flow.enter_day()
+        flow.nominate("u1", "u4")
+        flow.vote("u1", True)
+        flow.close_vote()
+
+        messages = pipeline.tick("core-pipeline")
+
+        self.assertEqual(flow.grimoire.phase, GamePhase.DAY)
+        self.assertEqual(flow.grimoire.day, 1)
+        self.assertIn("day_deadline", flow.grimoire.pipeline_state)
+        self.assertTrue(any("Day discussion timer: 30 seconds." in message.text for message in messages))
+
+    def test_expired_day_timer_without_auto_advance_announces_once(self) -> None:
+        pipeline = CorePipeline(
+            GameMasterConfig(
+                default_channel_id="core-pipeline",
+                min_players_to_start=5,
+                day_discussion_seconds=0,
+                auto_advance_day=False,
+            )
+        )
+        flow = pipeline.create_game("core-pipeline")
+        for index in range(1, 6):
+            flow.join(f"u{index}", f"P{index}")
+        flow.start_setup()
+        flow.assign_role(RoleAssignment("u1", "chef", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u2", "empath", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u3", "washerwoman", Alignment.GOOD))
+        flow.assign_role(RoleAssignment("u4", "poisoner", Alignment.EVIL))
+        flow.assign_role(RoleAssignment("u5", "imp", Alignment.EVIL))
+        flow.enter_day()
+
+        first = pipeline.tick("core-pipeline")
+        second = pipeline.tick("core-pipeline")
+
+        self.assertEqual(flow.grimoire.phase, GamePhase.DAY)
+        self.assertEqual(flow.grimoire.day, 1)
+        self.assertEqual(flow.grimoire.pipeline_state["stage"], "day_discussion_expired")
+        self.assertEqual(flow.grimoire.pipeline_state["day_timer_expired_day"], 1)
+        self.assertTrue(any("Day discussion timer expired" in message.text for message in first))
+        self.assertEqual(second, [])
+
     def test_runtime_action_can_pause_pipeline(self) -> None:
         pipeline = self.make_pipeline()
         pipeline.tick("core-pipeline")

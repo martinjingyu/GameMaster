@@ -65,6 +65,31 @@ class CoreDayRulesTest(unittest.TestCase):
         self.assertEqual(flow.grimoire.phase, GamePhase.DAY)
         self.assertFalse(flow.grimoire.pipeline_state.get("winner"))
 
+    def test_nomination_pauses_day_timer_and_sets_voting_stage(self) -> None:
+        flow = self.make_flow()
+        flow.grimoire.pipeline_state["day_deadline"] = "stale"
+        flow.grimoire.pipeline_state["stage"] = "day_discussion"
+
+        result = flow.nominate("u1", "u4")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(flow.grimoire.phase, GamePhase.VOTING)
+        self.assertNotIn("day_deadline", flow.grimoire.pipeline_state)
+        self.assertEqual(flow.grimoire.pipeline_state["stage"], "voting")
+
+    def test_failed_vote_restarts_day_discussion_timer_state(self) -> None:
+        flow = self.make_flow()
+        flow.grimoire.pipeline_state["day_deadline"] = "old"
+
+        flow.nominate("u1", "u4")
+        flow.vote("u1", True)
+        result = flow.close_vote()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(flow.grimoire.phase, GamePhase.DAY)
+        self.assertNotIn("day_deadline", flow.grimoire.pipeline_state)
+        self.assertEqual(flow.grimoire.pipeline_state["stage"], "day_discussion")
+
     def test_vote_at_threshold_executes_target(self) -> None:
         flow = self.make_flow()
 
@@ -77,9 +102,12 @@ class CoreDayRulesTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertFalse(flow.grimoire.assignments["u4"].is_alive)
         self.assertEqual(flow.grimoire.phase, GamePhase.DAY)
+        self.assertNotIn("day_deadline", flow.grimoire.pipeline_state)
+        self.assertEqual(flow.grimoire.pipeline_state["stage"], "day_discussion")
 
     def test_executing_demon_wins_for_good(self) -> None:
         flow = self.make_flow()
+        flow.grimoire.pipeline_state["day_deadline"] = "old"
 
         flow.nominate("u1", "u5")
         flow.vote("u1", True)
@@ -91,6 +119,8 @@ class CoreDayRulesTest(unittest.TestCase):
         self.assertFalse(flow.grimoire.assignments["u5"].is_alive)
         self.assertEqual(flow.grimoire.pipeline_state["winner"], "good")
         self.assertEqual(flow.grimoire.phase, GamePhase.GAME_OVER)
+        self.assertNotIn("day_deadline", flow.grimoire.pipeline_state)
+        self.assertEqual(flow.grimoire.pipeline_state["stage"], "game_over")
 
     def test_scarlet_woman_becomes_demon_before_good_win(self) -> None:
         flow = self.make_scarlet_flow()
@@ -245,6 +275,17 @@ class CoreDayRulesTest(unittest.TestCase):
 
         self.assertFalse(second_nomination.ok)
         self.assertEqual(second_nomination.error, "nominator has already nominated today")
+
+    def test_vote_and_close_vote_are_rejected_outside_voting_phase(self) -> None:
+        flow = self.make_flow()
+
+        vote = flow.vote("u1", True)
+        close = flow.close_vote()
+
+        self.assertFalse(vote.ok)
+        self.assertEqual(vote.error, "votes can only be cast during voting")
+        self.assertFalse(close.ok)
+        self.assertEqual(close.error, "votes can only close during voting")
 
 
 class MayorRedirectProvider:
