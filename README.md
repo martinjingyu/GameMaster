@@ -51,13 +51,15 @@ python -m gamemaster serve --host 127.0.0.1 --port 8787
 python -m gamemaster serve --host 127.0.0.1 --port 8787 --data data/local-games.json
 ```
 
+新 core 会使用独立存档 `data/local-games.core.json`，避免和旧 engine 的 JSON 结构互相覆盖。
+
 然后打开：
 
 ```text
 http://127.0.0.1:8787/test
 ```
 
-页面里可以：
+默认 `/test` 现在连接新 core agent / pipeline；旧版页面保留在 `/legacy/test`。页面里可以：
 
 - 点“一键建 5 人局”让 5 个模拟玩家加入；游戏由 agent pipeline 自动创建和倒计时开始。
 - 公开消息进入群聊，私密身份进入每个玩家自己的窗口。
@@ -263,3 +265,115 @@ POST `/gateway/events`
 ```powershell
 python -m unittest discover -s tests
 ```
+
+## Core Rewrite
+
+当前新增进度：
+
+- RoleAllocator 支持 5-15 人 Trouble Brewing 人数分布。
+- Baron setup 已接入：抽到 `baron` 时自动减少 2 个 Townsfolk，并增加 2 个 Outsider。
+- Drunk setup 已接入：真实身份保留为 `drunk`，玩家可见身份会显示为一个 Townsfolk，且优先选择未在场镇民。
+- Trouble Brewing outsider 池已补齐到 Drunk / Saint / Recluse / Butler，便于 Baron 修正规则在大人数局生效。
+- 新 core 已接入白天提名、投票、关闭投票和处决流程。
+- 新 core 已接入基础胜负判断：恶魔死亡善良胜利、仅剩 2 名存活且恶魔仍在场邪恶胜利、Saint 被处决邪恶胜利。
+- Scarlet Woman 已接入恶魔转移：恶魔死亡且仍有至少 5 名存活玩家时，活着且清醒健康的 Scarlet Woman 会秘密变成 Imp。
+- Slayer 已接入白天射击：真 Slayer 射中恶魔会杀死目标；酒鬼/中毒 Slayer 会消耗能力但不生效。
+- Undertaker 已接入普通夜信息：得知当天被处决者的角色，醉酒/中毒时走 false_information 裁量。
+- Monk 已接入夜晚保护：健康 Monk 的保护可以阻止恶魔造成的死亡。
+- Ravenkeeper 已接入夜死信息：夜晚死亡后按夜间选择得知目标角色。
+- Mayor 已接入三人生存无人处决胜利，以及恶魔夜杀时的 optional_death 转移裁量。
+- Virgin 已接入首次被镇民提名时处决提名者。
+- Soldier 已接入免疫恶魔死亡。
+- Trouble Brewing 角色池已补齐到官方 22 角色：新增 Librarian / Investigator / Spy / Recluse / Butler。
+- Librarian / Investigator 已接入首夜信息；Spy 可在夜晚获得魔典摘要；Butler 已接入夜选 master 和白天赞成票限制；Recluse 先以真实角色卡和误登记能力文本进入系统。
+- ActionValidator 已接入新 core 夜间行动提交：校验阶段、角色匹配、目标数量、重复提交、死亡状态和 Monk 自保限制。
+- LLMDecisionProvider 已接入新 core：复用 OpenAI-compatible/DeepSeek client，把 `DecisionRequest` 转成 JSON prompt，并把模型 JSON 转回 `DecisionProposal`；失败时自动 fallback。
+- Setup visibility 已接入新 core：身份私信、邪恶阵营互认、恶魔伪装角色都会作为可见性受控事件写入魔典。
+- MemoryCompactor 已接入新 core：结构化事件不删除，旧事件可折叠进 `grimoire.summary`，LLM context 默认只取最近可见事件。
+- Registration override 已接入新 core：`grimoire.pipeline_state["registration_overrides"]` 可让 Recluse / Spy 在 Empath、Chef、Fortune Teller 等登记敏感能力里临时登记为不同阵营或角色类型。
+- CoreGameStore 已接入新 core：使用 `--data data/local-games.json` 启动时，core 状态会落盘到 `data/local-games.core.json`，包含玩家、座位、身份、事件流、pipeline_state、night_actions 和 channel 映射。
+- CoreAgent 已支持常见自然语言输入：夜晚私聊可写“我毒 3 号”“今晚查 P3 和 P7”，白天群聊可写“我提名 4 号”“赞成/反对”，系统会先解析为 player_id 再交给 ActionValidator。
+- CorePipeline 已支持夜晚行动提醒：夜晚倒计时过半后，会私信提醒仍需要行动且尚未提交的玩家。
+- Core recap 已接入：`/core/games/<game_id>/recap?player_id=<viewer>` 会按玩家可见性生成复盘；`__storyteller__` 视角可看全量事件。
+- CorePlayerResponder 已接入防泄密回复上下文：玩家私聊问规则/状态时，只把该玩家可见的 `llm_context_for(player_id)` 交给 LLM；如果模型回复包含该玩家不可见的身份信息，会自动 fallback 到安全模板。
+
+新的核心框架先放在 `src/gamemaster/core`，不直接破坏旧的本地测试服务。当前已落地的基础类：
+
+- `GameFlow`：新的游戏流程主体，负责等待玩家、setup、首夜等状态推进。
+- `Grimoire`：append-only 魔典，保存玩家、座位、身份实例、事件流，并提供玩家视角可见性过滤。
+- `RoleCard`：角色卡基类，角色通过 hooks 产生确定性 effect 或 `DecisionRequest`。
+- `DecisionRequest` / `DecisionProposal` / `StorytellerDecision`：LLM 自动裁量协议。
+- `StorytellerDecisionEngine`：调用裁量 provider，校验合法选项，非法时自动 fallback。
+- `ActionExecutor`：唯一写入魔典和发出消息的执行层。
+- `RoleAllocator`：按人数分配 Trouble Brewing 最小角色池，并生成恶魔伪装。
+- `NightOrderResolver`：按首夜/其他夜行动顺序执行角色 hook。
+- `RulesEngine`：集中处理白天提名、投票、处决、基础胜负判断和部分行动合法性。
+
+已实现的最小示例覆盖了 Trouble Brewing 的几种关键能力形态：
+
+- 清醒健康 Empath：代码直接计算邻居邪恶数量。
+- 酒鬼/中毒 Empath：生成 `false_information` 裁量请求。
+- Washerwoman：生成 `setup_selection` 裁量请求，选择信息候选人。
+- Chef：代码直接计算相邻邪恶玩家对数。
+- Fortune Teller：读取夜间行动，给 yes/no 信息；酒鬼/中毒时走裁量。
+- Poisoner：读取夜间行动并写入 `poisoned` 状态。
+- Imp：读取夜间行动并写入死亡事件。
+- RoleAllocator：目前覆盖 5-15 人 TB 分布。
+- RulesEngine：支持白天提名、投票、关闭投票、处决、鬼票消耗、每日提名限制。
+- 基础胜负判断：恶魔死亡、两人生存、Saint 被处决。
+- Scarlet Woman：在胜负判断前接任恶魔，避免误判善良胜利。
+- Slayer：支持一次性白天公开射击，并复用死亡后的胜负/恶魔转移检查。
+- Undertaker / Ravenkeeper：支持夜间角色信息，并在醉酒/中毒时生成裁量请求。
+- Monk / Soldier：支持阻止恶魔死亡。
+- Mayor：支持三人生存无人处决胜利与死亡转移裁量。
+- Virgin：支持首次被镇民提名立即处决提名者。
+- Librarian / Investigator：支持首夜角色信息。
+- Spy：支持夜晚查看魔典摘要。
+- Butler：支持夜选 master，并限制白天赞成票。
+- Recluse：已作为真实 Outsider 角色卡进入脚本，并可通过 registration override 在需要时登记为邪恶或恶魔。
+- ActionValidator：支持新 core 夜间行动提交校验，并提供 `GameFlow.submit_night_action(...)` 入口。
+- LLMDecisionProvider：支持 `DecisionRequest -> OpenAI-compatible/DeepSeek -> DecisionProposal`，并由 DecisionValidator 二次校验。
+- Setup visibility：支持 `GameFlow.send_setup_info()`，分发玩家身份、evil_team 信息和 demon bluffs。
+- MemoryCompactor：支持 `GameFlow.compact_memory(...)`，保留完整事件流并维护短 summary。
+- NightOrderResolver：能保证 Poisoner 在 Fortune Teller 前执行，Imp 后执行。
+- LLM/provider 返回合法数字后自动执行。
+- LLM/provider 返回非法数字时自动 fallback。
+- 玩家视角不能看到 storyteller-only 的身份分配事件。
+
+对应测试在：
+
+```text
+tests/test_core_rewrite.py
+tests/test_core_allocator_night.py
+tests/test_core_day_rules.py
+tests/test_core_action_validator.py
+tests/test_core_llm_provider.py
+tests/test_core_memory.py
+```
+
+新 core HTTP 入口已开始接入旧 server，并与旧 `/test` 并存：
+
+```text
+POST /core/games
+POST /core/games/<game_id>/join
+POST /core/games/<game_id>/start
+POST /core/games/<game_id>/night-action
+POST /core/games/<game_id>/resolve-night
+POST /core/games/<game_id>/compact-memory
+POST /core/events
+POST /core/agent/tick
+POST /core/agent/action
+GET  /core/games/<game_id>
+GET  /core/games/<game_id>/events?player_id=<player_id>
+```
+
+这些入口现在由新 core 驱动默认 `/test`；旧页面保留在 `/legacy/test`。`/core/events` 使用和旧 gateway 相同的 payload 形状，但交给新的 `CoreAgent` 处理 `/new`、`/join`、`/start`、`/role`、`/action`、`/resolve`、`/nominate`、`/vote` 等命令，也支持常见自然语言行动、提名和投票。`/core/agent/tick` 使用新的 `CorePipeline` 自动建局、倒计时开局、夜晚提醒、夜晚结算和白天推进；`/core/agent/action` 支持 pause/resume、set_timer、extend、shorten、set_override、clear_override、force_phase。使用 `--data` 启动时，core 状态会保存到独立 `.core.json` 文件。
+
+新 core 也有独立测试页：
+
+```text
+http://127.0.0.1:8787/core/test
+```
+
+该页面直接调用 `/core/games...`，可创建 core game、加入 5 名玩家、开始 setup、切换玩家视角查看可见事件。
+页面也提供 Core Tick / Pause / Resume 控件，可测试新 core pipeline。
